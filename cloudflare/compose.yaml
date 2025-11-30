@@ -1,6 +1,8 @@
 
 networks:
   tunneled:
+  nextcloud-aio:
+    external: true
 
 services:
 
@@ -13,3 +15,4 @@ services:
     command: tunnel --no-autoupdate run
     networks:
       - tunneled
+      - nextcloud-aio
