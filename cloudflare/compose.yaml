@@ -3,6 +3,8 @@ networks:
   tunneled:
   nextcloud-aio:
     external: true
+  firefly_firefly_iii:
+    external: true
 
 services:
 
@@ -16,3 +18,4 @@ services:
     networks:
       - tunneled
       - nextcloud-aio
+      - firefly_firefly_iii
