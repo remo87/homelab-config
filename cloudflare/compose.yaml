@@ -1,8 +1,6 @@
 
 networks:
   tunneled:
-  nextcloud-aio:
-    external: true
   firefly_firefly_iii:
     external: true
 
@@ -17,5 +15,4 @@ services:
     command: tunnel --no-autoupdate run
     networks:
       - tunneled
-      - nextcloud-aio
       - firefly_firefly_iii
