@@ -13,6 +13,14 @@
 
 Recommended strategy: **incremental migration per service**, starting with the simplest ones (cloudflared, Firefly III) and leaving Immich and Home Assistant for last (more complex).
 
+## Per-application plans
+
+- [cloudflared.md](./cloudflared.md) — Cloudflare Tunnel ingress (migrates first; validates the cluster)
+- [firefly.md](./firefly.md) — Firefly III (3 pods: core, MariaDB, cron; Helm chart)
+- [immich.md](./immich.md) — Immich (4 pods: server, ML, postgres, valkey; heaviest workload)
+- [homeassistant.md](./homeassistant.md) — Home Assistant (special: `hostNetwork`, `hostPort: 8123`, USB radio)
+- *Forgejo stays on Docker Compose* — compose at [`homelab-config/forgejo/compose.yaml`](../forgejo/compose.yaml); intentionally excluded from this migration.
+
 ---
 
 ## 1. Current environment state
@@ -255,10 +263,10 @@ Recommended structure under `/home/ricardo/k8s-manifests/`:
 ```
 k8s-manifests/
 ├── 00-namespace/
-├── 01-cloudflared/        # first: validates the tunnel
-├── 02-firefly/            # second: 3 simple pods
-├── 03-immich/             # third: 3 pods + ML
-└── 04-homeassistant/      # last: special case
+├── 01-cloudflared/        # first: validates the tunnel — see [cloudflared.md](./cloudflared.md)
+├── 02-firefly/            # second: 3 simple pods — see [firefly.md](./firefly.md)
+├── 03-immich/             # third: 3 pods + ML — see [immich.md](./immich.md)
+└── 04-homeassistant/      # last: special case — see [homeassistant.md](./homeassistant.md)
 ```
 
 **For Immich and Firefly use community Helm charts** instead of hand-written manifests:
@@ -270,20 +278,21 @@ k8s-manifests/
 
 ### Phase 4 — Switch (estimated 30–60 min downtime)
 
-Suggested order:
+Suggested order (one service at a time, smoke test before moving on):
 
-1. Repeat for each service in the order: cloudflared → firefly → immich → homeassistant.
-2. After migrating cloudflared, update Cloudflare Tunnel to point at `192.168.0.200` (MetalLB) instead of `127.0.0.1`.
-3. **Smoke tests** per service (see §4.1).
+1. [cloudflared](./cloudflared.md) — bring up the tunnel, then update Cloudflare dashboard routing.
+2. [firefly](./firefly.md) — Helm install, restore MariaDB, switch hostname.
+3. [immich](./immich.md) — Helm install, restore Postgres, re-attach library, restart server.
+4. [homeassistant](./homeassistant.md) — apply Deployment, validate USB + Zigbee, reboot test.
 
 #### 4.1 Smoke tests per service
 
-| Service | Test |
-|---|---|
-| Immich | Web UI loads at `http://192.168.0.200`, login OK, thumbnails of existing library visible |
-| Firefly III | Login OK, transaction list, budget rule evaluates |
-| Home Assistant | UI loads at `http://192.168.0.17:8123`, Zigbee/Z-Wave integrations respond |
-| cloudflared | Tunnel `HEALTHY` in Cloudflare dashboard, hit to public URL → 200 |
+| Service | Test | Per-app plan |
+|---|---|---|
+| cloudflared | Tunnel `HEALTHY` in Cloudflare dashboard, hit public URL → 200 | [cloudflared.md](./cloudflared.md) |
+| Firefly III | Login OK, transaction list, budget rule evaluates | [firefly.md](./firefly.md) |
+| Immich | Web UI loads at `http://192.168.0.200`, login OK, thumbnails of existing library visible | [immich.md](./immich.md) |
+| Home Assistant | UI loads at `http://192.168.0.17:8123`, Zigbee / Z-Wave integrations respond | [homeassistant.md](./homeassistant.md) |
 
 ### Phase 5 — Post-migration hardening (~2 h)
 
@@ -304,53 +313,9 @@ Suggested order:
 
 ---
 
-## 5. Special case: Home Assistant
+## 5. Special cases
 
-Home Assistant on Docker uses `privileged: true`, `network_mode: host`, `/dev/ttyUSB0`. Migration to Kubernetes:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: homeassistant
-  namespace: homelab
-spec:
-  replicas: 1
-  template:
-    spec:
-      hostNetwork: true
-      containers:
-      - name: homeassistant
-        image: ghcr.io/home-assistant/home-assistant:stable
-        securityContext:
-          privileged: true
-        ports:
-        - hostPort: 8123
-          containerPort: 8123
-        volumeMounts:
-        - name: config
-          mountPath: /config
-        - name: dbus
-          mountPath: /run/dbus
-        - name: ttyusb
-          mountPath: /dev/ttyUSB0
-      volumes:
-      - name: config
-        persistentVolumeClaim:
-          claimName: ha-config
-      - name: dbus
-        hostPath:
-          path: /run/dbus
-      - name: ttyusb
-        hostPath:
-          path: /dev/ttyUSB0
-```
-
-Notes:
-
-- **Cannot be placed behind MetalLB/Ingress** because HA listens on mDNS and zeroconf. It stays on `hostPort 8123`, reachable at `http://192.168.0.17:8123`.
-- If the USB device changes from `/dev/ttyUSB0` after a reboot, consider a fixed `udev` rule or a USB device plugin.
-- `privileged: true` is required for access to `/dev/ttyUSB*`, Bluetooth, etc.
+Per-app plans already document their own special cases (e.g. [homeassistant.md](./homeassistant.md) for `hostNetwork` + `privileged` + USB; [immich.md](./immich.md) for ML cache and PVC sizing). No additional cross-cutting special cases apply.
 
 ---
 
@@ -360,12 +325,8 @@ Notes:
 |---|---|---|---|
 | OOM due to insufficient RAM | Medium | High | Stop Docker before bringing k8s up; strict `resources.limits`; disable `dns` addon if too tight (saves 50 MiB) |
 | microk8s complains about swap | High | Low | Disable swap in phase 1 (planned) |
-| Data loss in Immich during migration | Low | Critical | LVM snapshot + `cp -a` before + `pg_dumpall` |
-| HA does not detect Zigbee after migration | Medium | Medium | Document device paths; test with a `hostNetwork` Pod before removing Docker |
-| Cloudflare Tunnel pointing at a dead IP | Low | High | Change IP in Cloudflare only after smoke tests pass |
 | microk8s updates break the cluster (auto snap refresh) | Low | Medium | `sudo snap refresh --hold microk8s` during evaluation; use channel `1.35/stable` (ships v1.35.6, not edge) |
 | K8s learning time exceeds the weekend | High | Low | Plan is for learning, no rush |
-| Immich ML cache is not migrated | Low | Low | PVC starts empty, Immich re-downloads models (~5 GiB of bandwidth) |
 | Host port conflict between Docker and k8s | Low | Medium | Before phase 4, stop Docker. After phase 4, no k8s host ports remain (all via MetalLB/Ingress, except HA `hostPort`). |
 
 ---
