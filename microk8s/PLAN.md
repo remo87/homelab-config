@@ -64,12 +64,14 @@ Recommended strategy: **incremental migration per service**, starting with the s
 
 Compose files live at:
 
-- `/home/ricardo/services/forgejo/compose.yaml`
+- `homelab-config/forgejo/compose.yaml`
 - `/home/ricardo/services/homelab-config/{immich,firefly,homeassistant,cloudflare,nextcloud}/compose*.y*ml`
 
 ---
 
 ## 2. Target architecture
+
+> *Forgejo stays on Docker Compose (compose file at `homelab-config/forgejo/compose.yaml`); it is intentionally excluded from this migration.*
 
 ```
                      ┌─────────────────────────────┐
@@ -79,7 +81,7 @@ Compose files live at:
                      │             │
                      │             ▼
                      │     ┌──────────────┐
-                     │     │  MetalLB L2  │  pool: 192.168.0.200–210
+                     │     │  MetalLB L2  │  pool: 192.168.0.250–254
                      │     └──────┬───────┘
                      │            ▼
                      │     ┌──────────────┐
@@ -89,8 +91,8 @@ Compose files live at:
                      │            │
    ┌────────────┬────┴────┬───────┴──────┬─────────────┐
    ▼            ▼         ▼              ▼             ▼
- Immich      Forgejo   Home Asst     Firefly III   cloudflared
- (3 pods)    (2 pods)  (1 pod host)  (3 pods)      (1 pod)
+ Immich       Home Asst     Firefly III   cloudflared
+ (3 pods)     (1 pod host)  (3 pods)      (1 pod)
    │            │         │              │
    └─hostPath/PVC (local-path) at /var/snap/microk8s/common/storage/...
 ```
@@ -146,8 +148,6 @@ Remaining for microk8s: ~5.3 GiB. Estimated microk8s consumption on single-node:
 | immich-ml | `immich-model-cache` | 20 GiB | `/cache` | empty (populated on first start) |
 | immich-postgres | `immich-pgdata` | 50 GiB | `/var/lib/postgresql/data` | bind `/home/ricardo/immich/postgres` |
 | immich-redis | (no PVC) | — | — | recreatable |
-| forgejo | `forgejo-data` | 50 GiB | `/data` | bind `./forgejo` |
-| forgejo-db | `forgejo-pgdata` | 20 GiB | `/var/lib/postgresql/data` | bind `./postgres` |
 | homeassistant | `ha-config` | 20 GiB | `/config` | bind `/home/ricardo/services/homeassistant/config` |
 | firefly-core | `firefly-upload` | 5 GiB | `/var/www/html/storage/upload` | copy from named volume |
 | firefly-db | `firefly-mariadb` | 5 GiB | `/var/lib/mysql` | copy from named volume |
@@ -202,7 +202,7 @@ StorageClass: `microk8s-hostpath` (provided by the `storage` addon).
 - Install microk8s (stable channel):
 
   ```bash
-  sudo snap install microk8s --classic --channel=1.31/stable
+  sudo snap install microk8s --classic --channel=1.35/stable  # ships v1.35.6
   sudo usermod -aG microk8s $USER
   mkdir -p ~/.kube
   newgrp microk8s
@@ -257,15 +257,13 @@ k8s-manifests/
 ├── 00-namespace/
 ├── 01-cloudflared/        # first: validates the tunnel
 ├── 02-firefly/            # second: 3 simple pods
-├── 03-forgejo/            # third: 2 pods
-├── 04-immich/             # fourth: 3 pods + ML
-└── 05-homeassistant/      # last: special case
+├── 03-immich/             # third: 3 pods + ML
+└── 04-homeassistant/      # last: special case
 ```
 
-**For Immich, Forgejo and Firefly use community Helm charts** instead of hand-written manifests:
+**For Immich and Firefly use community Helm charts** instead of hand-written manifests:
 
 - Immich: `helm install immich immunefi/immich -n homelab` (or TrueCharts).
-- Forgejo: official chart on Codeberg (`https://codeberg.org/forgejo-contrib/forgejo-helm`).
 - Firefly III: custom chart or TrueCharts.
 - Home Assistant: hand-written manifest because of its special nature (see §5).
 - cloudflared: simple Deployment with `TUNNEL_TOKEN` in a Secret.
@@ -274,18 +272,15 @@ k8s-manifests/
 
 Suggested order:
 
-1. `docker compose down` in `/home/ricardo/services/forgejo/`.
-2. Validate Forgejo in k8s.
-3. Repeat for each service in the order: cloudflared → firefly → forgejo → immich → homeassistant.
-4. After migrating cloudflared, update Cloudflare Tunnel to point at `192.168.0.200` (MetalLB) instead of `127.0.0.1`.
-5. **Smoke tests** per service (see §4.1).
+1. Repeat for each service in the order: cloudflared → firefly → immich → homeassistant.
+2. After migrating cloudflared, update Cloudflare Tunnel to point at `192.168.0.200` (MetalLB) instead of `127.0.0.1`.
+3. **Smoke tests** per service (see §4.1).
 
 #### 4.1 Smoke tests per service
 
 | Service | Test |
 |---|---|
 | Immich | Web UI loads at `http://192.168.0.200`, login OK, thumbnails of existing library visible |
-| Forgejo | `git clone http://192.168.0.200:3000/<user>/<repo>.git` and a test push |
 | Firefly III | Login OK, transaction list, budget rule evaluates |
 | Home Assistant | UI loads at `http://192.168.0.17:8123`, Zigbee/Z-Wave integrations respond |
 | cloudflared | Tunnel `HEALTHY` in Cloudflare dashboard, hit to public URL → 200 |
@@ -368,7 +363,7 @@ Notes:
 | Data loss in Immich during migration | Low | Critical | LVM snapshot + `cp -a` before + `pg_dumpall` |
 | HA does not detect Zigbee after migration | Medium | Medium | Document device paths; test with a `hostNetwork` Pod before removing Docker |
 | Cloudflare Tunnel pointing at a dead IP | Low | High | Change IP in Cloudflare only after smoke tests pass |
-| microk8s updates break the cluster (auto snap refresh) | Low | Medium | `sudo snap refresh --hold microk8s` during evaluation; use channel `1.31/stable` (not edge) |
+| microk8s updates break the cluster (auto snap refresh) | Low | Medium | `sudo snap refresh --hold microk8s` during evaluation; use channel `1.35/stable` (ships v1.35.6, not edge) |
 | K8s learning time exceeds the weekend | High | Low | Plan is for learning, no rush |
 | Immich ML cache is not migrated | Low | Low | PVC starts empty, Immich re-downloads models (~5 GiB of bandwidth) |
 | Host port conflict between Docker and k8s | Low | Medium | Before phase 4, stop Docker. After phase 4, no k8s host ports remain (all via MetalLB/Ingress, except HA `hostPort`). |
@@ -383,7 +378,7 @@ Notes:
 | 1. Install | 30 min | 0 |
 | 2. Storage | 1 h | 0 |
 | 3. Manifests | 3–4 h | 0 |
-| 4. Switch (5 services) | 1–2 h | **~15 min per service** (rolling) |
+| 4. Switch (4 services) | 1–2 h | **~15 min per service** (rolling) |
 | 5. Hardening | 2 h | 0 |
 | 6. Cleanup | 30 min | 0 |
 | **Total** | **~9–10 h** | **30–60 min aggregated** |
@@ -398,10 +393,9 @@ To reduce risk and validate incrementally:
 
 1. **Day 1 (Phases 0–2)**: pre-flight + microk8s install + storage. Validate empty workloads (nginx welcome).
 2. **Day 2 (Phase 3)**: manifests for `cloudflared` and `firefly`. Migrate both. Validate 24 h.
-3. **Day 3 (Phase 3)**: manifests for `forgejo`. Migrate. Validate 24 h.
-4. **Day 4 (Phase 3)**: manifests for `immich`. Migrate. Validate 24 h.
-5. **Day 5 (Phase 3)**: manifests for `homeassistant`. Migrate carefully due to USB. Validate 48 h.
-6. **Day 7+**: hardening, backups, Docker cleanup.
+3. **Day 3 (Phase 3)**: manifests for `immich`. Migrate. Validate 24 h.
+4. **Day 4 (Phase 3)**: manifests for `homeassistant`. Migrate carefully due to USB. Validate 48 h.
+5. **Day 6+**: hardening, backups, Docker cleanup.
 
 ---
 
@@ -425,7 +419,7 @@ microk8s kubectl exec -n homelab <pod> -- bash
 snap info microk8s
 sudo snap refresh --hold microk8s          # freeze updates
 sudo snap refresh microk8s                  # update manually
-sudo snap switch microk8s --channel=1.32/stable  # switch channel
+sudo snap switch microk8s --channel=1.35/stable  # switch channel (ships v1.35.6)
 ```
 
 ### 9.3 Debug
